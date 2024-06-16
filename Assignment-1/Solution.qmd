@@ -1,0 +1,605 @@
+---
+title: "Assignment 1"
+subtitle: "Exercise 2"
+author: "Shubh Gaur - 23200555"
+format: 
+  html:
+   embed-resources: true
+  pdf: 
+    geometry:
+    - top=20mm
+    - left=15mm
+    - heightrounded
+execute: 
+  error: true
+---
+
+## Importing libraries
+
+```{r}
+#| message: False
+#| output: False
+# packages to import
+packages <- c("dplyr", "glmnet", "keras", "ggplot2", "e1071")
+
+# Install and load packages
+for (pkg in packages) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg)
+    library(pkg, character.only = TRUE)
+  }
+}
+```
+
+## Loading the data
+
+Lets start with loading the data file which contains the data set and make a copy of it for later use.
+
+Lets also print the first 6 rows in the data set.
+
+```{r}
+#| message: False
+load('data_assignment_1_bats.Rdata')
+data <- data.frame(data_bats)
+```
+
+Lets check the dimensions of the dataset.
+
+```{r}
+dim(data)
+```
+
+There are **72 predictors** in the data set and **one response variable** which makes it a total of **73** columns.
+
+Lets also check the structure of response variable.
+
+```{r}
+str(data$Family,strict.width ='cut')
+```
+
+We can see that response variable is already a factor so we won't need to transform it again.
+
+Now, we will be checking for **NA/missing values** in the data set.
+
+```{r}
+anyNA(data)
+```
+
+Its clear from the output that we don't have any missing values in the provided data.
+
+We can now proceed with transforming the data to make it suitable for the models that we'll be implementing in the later sections.
+
+## Normalizing the data
+
+We will be standardizing the data such that each column will be having a mean of 0 and standard deviation of 1.
+
+Before proceeding we need to fetch response and predictors in separate objects because, if we try to transform the whole data set **(response with predictors)** then error will be thrown because response variable is a factor and scaling of factors is neither allowed by the **scale** function nor it makes any sense.
+
+We will be creating a new data frame using the scaled predictors and response.
+
+```{r}
+y <- data$Family
+x <- scale(select(data,c(-Family)))
+data <- data.frame(Family=y,x)
+head(data,strict.width=TRUE)
+```
+
+## Splitting the data into train and test sets
+
+We will be keeping aside a 20% split of the data for testing the model. The remaining 80% data will be used for:
+
+-   Dimensionality reduction using **PCA**.
+
+-   Training the models using training and validation setsrandomly sampled from the original training set.
+
+We will be setting the seed before initializing the train and test sets for reproducibility and then again un-setting the seed to ensure different train and validation sets are constructed during hyper parameter tuning.
+
+```{r}
+# Number of observations
+n_obs <- nrow(data)
+
+train_size <- floor(n_obs * 0.8)   # 80% for training and validation
+test_size <- floor(n_obs * 0.2)  # 20% for testing
+
+set.seed(23200555)
+
+# Creating indices for train and test sets
+train_indices <- sample(1:n_obs, train_size)
+test_indices <- sample(setdiff(1:n_obs, train_indices), test_size)
+
+# Initialising datasets
+train_set <- data[train_indices, ]
+x_train <- select(train_set,-Family)
+y_train <- train_set$Family
+
+test_set <- data[test_indices, ]
+x_test <- select(test_set,-Family)
+y_test <- test_set$Family
+
+# unsetting the seed, for randomness during cross validation 
+set.seed(NULL)
+```
+
+## Dimensionality Reduction
+
+Since there are many predictor variables, we will need to reduce the dimensionality of the data set to reduce its complexity.
+
+We can achieve this using **Principal Component Analysis**.
+
+We will be applying Principal Component Analysis (PCA) to our data because it allows us to reduce the dimensionality of our data set while preserving most of the variability present in the original data.
+
+We will be passing the train data(predictor) that we initialized earlier to reduce the dimensionality of the dataset and generate pca mappings.
+
+Lets check the variance explained by different principal components after applying pca.
+
+```{r}
+pca <- prcomp(x_train)
+
+# compute cumulative proportion of variance
+prop <- cumsum(pca$sdev^2) / sum(pca$sdev^2) 
+prop
+```
+
+Now, the next step is to fetch the number of principal components required to explain (80 - 90)% variation in data.
+
+```{r}
+# get the principal components which explain variance of 80 to 90 %
+Q <- length(prop[prop >= 0.8 & prop <= 0.9]) 
+Q
+```
+
+We can see that there are 10 principal components which collectively explain the mentioned range of variance. We were successful in reducing the dimensionality of the data from 72 predictors to 10 predictors.
+
+Lets extract the first 10 principal components from the **train set** and and also map the **test set** onto the newly learned data subspace.
+
+```{r}
+x_train_pca <- pca$x[,1:Q] # extract first Q principal components
+train_data_pca <- data.frame(Family=y_train,x_train_pca)
+
+# map the test data to the subspace of principal components
+x_test_pca <- predict(pca, x_test)[,1:Q]
+test_data_pca <- data.frame(Family=y_test,x_test_pca)
+```
+
+## Multinomial Logistic Regression Model with L1 Regularization
+
+We will be building a multinomial logistic regression model with L1 regularization using the transformed training data set.
+
+L1 regularization helps by penalizing excessive complexity in the model, encouraging simpler and more interpretable solutions.
+
+This technique makes the generalizing ability of the classifier on unseen data more robust.
+
+For more information on the selected approach, [visit](%22https://glmnet.stanford.edu/articles/glmnet.html#multinomial-regression-family-multinomial%22).
+
+We will be creating random train and validation sets from the original training set.
+
+Then we will further segregate the original training dataset into sub-train and validation sets using a 80-20 split.
+
+But before doing that, we will be defining functions to aid in predictions and checking classification accuracy during hyper parameter tuning using these sets.
+
+```{r}
+# for computation of accuracy
+compute_accuracy <- function(y, y_pred) {
+  tab <- table(y, y_pred)
+  classAgreement(tab)$diag
+}
+
+# for predicting class with max probability
+# in the multinomial logistic regression model
+# for given values of lambda
+max_row <- function(mat) {
+  apply(mat, 1, function(row) which.max(row))
+}
+```
+
+### Hyperparameter tuning for $\lambda$
+
+In the code chunk below:
+
+-   We are generating a sequence of lambda values with exponential decay. We have also included a **0** penalty to take into account standard logistic regression model without regularization.
+
+-   We are sampling sub-train and validation sets for given number of iterations and then using different penalties($\lambda$) values to build the model along with storing accuracies on both training and validation sets in each nested iteration.
+
+-   We will also be measuring the time it took to find the best value of $\lambda$.
+
+```{r}
+while(TRUE) {
+  tryCatch({
+    S <- 100
+    lambda <- exp(seq(-3, -8, length.out = S-1))
+    
+    # lambda = 0 refers to model without penalty
+    # standard logistic regression
+    lambda <- c(lambda, 0)
+    
+    n_train <- nrow(train_set)
+    n_subtrain <- floor(n_train * 0.8)
+    n_validation <- floor(n_train * 0.2)
+    # number of times data initialisation process is repeated
+    n_iter <- 30 
+    
+    # store results 
+    acc_train <- acc_val <- matrix(NA, n_iter, S)
+    lambda_best <- rep(NA, n_iter)
+    
+    # for measuring time taken for execution
+    start_time <- Sys.time()
+    
+    for (b in 1:n_iter) {
+      # Split data into sub-training and validation sets
+      subtrain_indices <- sample(1:n_subtrain, n_subtrain)
+      subtrain_predictors <- x_train_pca[subtrain_indices, ]
+      subtrain_response <- y_train[subtrain_indices]     
+      
+      all_indices <- 1:n_train
+      
+      validation_indices <- sample(setdiff(all_indices, subtrain_indices), n_validation)
+      
+      validation_predictors <- x_train_pca[validation_indices, ]
+      validation_response <- y_train[validation_indices]  
+      
+      fit <- glmnet(subtrain_predictors, subtrain_response, family = "multinomial", lambda = lambda)
+      
+      # Make predictions on the sub-train set using the current lambda
+      p_subtrain <- predict(fit, newx = subtrain_predictors, type = "response")
+      y_subtrain_pred <- apply(p_subtrain, MARGIN = 3,max_row)
+      
+      # Make predictions on the validation set using the current lambda
+      p_val <- predict(fit, newx = validation_predictors, type = "response")
+      y_val_pred <- apply(p_val, MARGIN = 3,max_row)
+      
+      # estimate classification accuracy
+      acc_train[b,] <- sapply(1:S, function(s) compute_accuracy(subtrain_response, y_subtrain_pred[,s]) )
+      
+      acc_val[b,] <- sapply(1:S, function(s) compute_accuracy(validation_response, y_val_pred[,s]) )
+    }
+    
+    end_time <- Sys.time()
+    cat("Execution completed successfully.\n")
+    cat("Time taken for execution:", end_time - start_time, "\n")
+    
+    # Exit the loop since execution was successful
+    break
+  }, error = function(e) {
+    cat("Error occurred:", conditionMessage(e), "\n")
+    cat("Rerunning the code chunk...\n")
+  })
+}
+
+```
+
+The code chunk took around **1** minute for execution.
+
+**Note**: Execution time may vary from system to system.
+
+Finally, we are selecting the best values of $\lambda$ i.e. which gave the highest accuracy on validation sets overall. We are achieving this by checking the mean validation accuracy for a particular $\lambda$ across all iterations and subsetting out those $\lambda$ values by index which were giving highest validation accuracies.
+
+We will be using the best value of lambda for predictions on test data and then evaluate the performance metrics.
+
+**Note**: The reason for selecting multiple values of $\lambda$ when fitting the final model and not just **one** value was done to ensure convergence of the algorithm. Also, **glmnet** documentation has this warning mentioned [here](https://stats.stackexchange.com/questions/101101/convergence-for-1st-lambda-value-not-reached-error-using-glmnet-package-and-sp).
+
+```{r}
+#Getting best indices for lambda using sorting which maximized validation accuracy
+lambda_star_indices <- order(colMeans(acc_val),decreasing = TRUE)
+head(lambda_star_indices)
+```
+
+Its pretty clear from the output above that mean validation accuracy over all replications of sampling was maximum on 58th value of $\lambda$ .
+
+```{r}
+lambda[lambda_star_indices[1]]
+```
+
+We will be using the same value of $\lambda$ for evaluating performance metrics of the model.
+
+```{r}
+# Combine accuracy data into a data frame
+accuracy_df_train <- data.frame(lambda = lambda, accuracy = colMeans(acc_train), Type = "Training accuracy")
+accuracy_df_val <- data.frame(lambda = lambda, accuracy = colMeans(acc_val), Type = "Validation accuracy")
+accuracy_df <- rbind(accuracy_df_train, accuracy_df_val)
+
+# Plot
+ggplot(accuracy_df, aes(x = lambda, y = accuracy, color = Type)) +
+  geom_line(linetype = "solid", linewidth = 1.5) +
+  scale_color_manual(values = c("black", "deepskyblue3")) +
+  geom_vline(xintercept = lambda[lambda_star_indices[1]], linetype = "dashed", color = "red", size = 1)
+  labs(x = bquote(lambda), y = "Accuracy", subtitle = bquote("Accuracy vs. " ~ lambda)) +
+  theme(legend.position = "top")
+```
+
+Lets fit the model on the entire training set using $\lambda$ values initialized earlier and check the performance measures on the deduced best value of lambda.
+
+```{r}
+fit <- glmnet(x_train_pca, y_train, family = "multinomial",lambda = lambda)
+```
+
+We will be predicting on the test data that we kept apart earlier and check the performance measures on it.
+
+```{r}
+# Calculate confusion matrix for 58th lambda value which had the maximum accuracy on validation data
+predictions_model1 <- predict(fit, newx = x_test_pca, s = lambda[lambda_star_indices[1]], type = "class")
+conf_matrix_model1 <- table(predictions_model1[,1], y_test)
+conf_matrix_model1
+```
+
+```{r}
+# Compute accuracy
+accuracy <- sum(diag(conf_matrix_model1)) / sum(conf_matrix_model1)
+
+# Compute precision, recall, and F1 score for each class
+precision <- diag(conf_matrix_model1) / rowSums(conf_matrix_model1)
+recall <- diag(conf_matrix_model1) / colSums(conf_matrix_model1)
+f1_score <- 2 * (precision * recall) / (precision + recall)
+
+# Average precision, recall, and F1 score
+avg_precision <- mean(precision, na.rm = TRUE)
+avg_recall <- mean(recall, na.rm = TRUE)
+avg_f1_score <- mean(f1_score, na.rm = TRUE)
+
+# Print accuracy and other measures
+cat("Accuracy:", accuracy, "\n")
+cat("Average Precision:", avg_precision, "\n")
+cat("Average Recall:", avg_recall, "\n")
+cat("Average F1 Score:", avg_f1_score, "\n")
+```
+
+## Multiclass classification using neural networks
+
+We will be building a single hidden layer neural network for classifying bat families from the given dataset.
+
+The primary reasons for selecting a single hidden layer neural network are:
+
+-   they are easier to train than deeper architectures with multiple layers.
+-   they are computationally efficient in training as well as prediction in comparison to deeper architectures.
+-   There are high chances of overfitting in complex neural networks.
+
+But, before building our neural network, we need to convert our categorical response variable to numeric using one-hot encoding.
+
+```{r}
+# Convert from factor to numeric (0,1,2,3)
+y_numeric <- as.integer(factor(y_train, levels = levels(y_train))) - 1
+
+# One-hot encoding
+bat_fam <- to_categorical(y_numeric)
+bat_fam[1,]
+```
+
+We can clearly see that the target variable has successfully been dummy-encoded using one hot encoding.
+
+### Neural network description
+
+Our neural network has a single hidden layer which uses **ReLu** activation function because it helps in addressing the **vanishing gradient problem** which leads to faster convergence during training.
+
+We are using **softmax** activation function for the output layer with 4 neurons because we want to classify for the **4** species of the bat family. Also, it is well suited for multi class classification tasks. Softmax ensures that probabilities generated for different predicted classes sum upto 1 and also the probabilities are normalised, making it convenient to identify the class a data point belongs to based on its probability value.
+
+The loss function used in the neural network is **Categorical Crossentropy** which is well suited for multi class classification problems. Also, this loss function is differentiable which allows for its efficient optimization using techniques like gradient descent.
+
+The optimization function used is **RMSprop** optimizer which is an improved version of traditional gradient descent algorithms. It has adaptive learning rates for each parameter based on the magnitude of gradients of these parameters. **RMSprop** adjusts step size dynamically during training which leads to faster convergence.
+
+In the code chunk below :
+
+-   We will be creating random train and validation sets from the original training set using a 80-20 split in the outer loop.
+
+-   We will be replicating the above mentioned process **n_iter** times to account for the uncertainty due to random sampling(for re-initializing data).
+
+-   In the inner loop, we will be building the neural network with different values of **H** which specifies the total neurons that we want to keep in the hidden layer.
+
+The primary reasons for initializing **H_vec** in the mentioned sequence are:
+
+-   starting with few number of neurons initially is a good practice as it allows for exploration of simpler models first. We can increase the number of neurons gradually to see if the model fit is improving.
+
+-   Increasing the neurons gradually helps to avoid chances of over fitting.
+
+-   Training complex neural network models require high computational power. Choosing a range of values for H that is computationally feasible allows for efficient experimentation and model tuning.
+
+-   Moreover, it might take a lot of time if bigger values of **H** are present as it will take more time to train the neural network model as increase in **H** will contribute to an increase in the number of parameters to train for the model. Also, we are initializing and training different neural network models each time with randomly sampled data in each iteration of the outer loop which is adding to the complexity.
+
+```{r}
+#| message: false
+#| warning: false
+#| output: false
+# Set the range of hidden layer sizes
+H_vec <- seq(10, 60, by = 5)
+
+# Number of hidden layer sizes
+H <- length(H_vec)
+
+n_train <- nrow(train_set)
+n_subtrain <- floor(n_train * 0.7)
+n_validation <- floor(n_train * 0.3)
+n_iter <- 2
+
+# store results 
+acc_train <- acc_val <- matrix(NA, n_iter, H)
+
+start_time <- Sys.time()
+
+for (b in 1:n_iter) {
+  subtrain_indices <- sample(1:n_subtrain, n_subtrain)
+  train_predictors <- x_train[subtrain_indices, ] 
+  train_response <- bat_fam[subtrain_indices, ]
+  
+  all_indices <- 1:n_train
+  validation_indices <- sample(setdiff(all_indices, subtrain_indices), n_validation)
+  validation_predictors <- x_train[validation_indices, ]
+  validation_response <- bat_fam[validation_indices, ] 
+
+  for (h in 1:H) {
+    # Define and compile the model
+    model <- keras_model_sequential()
+    model %>%
+      layer_dense(units = H_vec[h], activation = "relu", input_shape = ncol(x_train)) %>%
+      layer_dense(units = 4, activation = "softmax") %>%
+      compile(
+  loss = "categorical_crossentropy",
+  optimizer = optimizer_rmsprop(),
+  metrics = c("accuracy")
+)
+    
+  # train the model
+  fit <- model %>% fit(
+    x = as.matrix(train_predictors), y = train_response,
+    validation_data = list(as.matrix(validation_predictors), validation_response),verbose=0)
+    
+    # Store accuracy
+    n_epoch <- fit$params$epochs
+    acc_train[b, h] <- fit$metrics$accuracy[n_epoch]
+    acc_val[b, h] <- fit$metrics$val_accuracy[n_epoch]
+  }
+}
+end_time <- Sys.time()
+```
+
+```{r}
+#| warning: false
+#| message: false
+# Calculate mean accuracy for training and validation
+mean_acc_train <- colMeans(acc_train)
+mean_acc_val <- colMeans(acc_val)
+
+# Create data frame for plotting
+df_train <- data.frame(H = H_vec, Accuracy = mean_acc_train, Dataset = "Training accuracy")
+df_val <- data.frame(H = H_vec, Accuracy = mean_acc_val, Dataset = "Validation accuracy")
+df <- rbind(df_train, df_val)
+
+# Plot using ggplot2
+ggplot(df, aes(x = H, y = Accuracy, color = Dataset, linetype = Dataset)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "H", y = "Accuracy", color = "Dataset", linetype = "Dataset") +
+  scale_color_manual(values = c("Training accuracy" = "black", "Validation accuracy" = "darkorange2")) +
+  scale_linetype_manual(values = c("Training accuracy" = "solid", "Validation accuracy" = "dashed")) +
+  theme(legend.position = "top")
+```
+
+Now we will be building the **neural network** using the best value of **H**.
+
+```{r}
+# best
+H_best <- H_vec[which.max(mean_acc_val)]
+H_best
+```
+
+```{r}
+#| warning: false
+#| message: false
+# Define and compile the model
+model <- keras_model_sequential()
+    model %>% layer_dense(units = H_best, activation = "relu", input_shape = ncol(x_train)) %>%
+      layer_dense(units = 4, activation = "softmax") %>%
+      compile(
+  loss = "categorical_crossentropy",
+  optimizer = optimizer_rmsprop(),
+  metrics = c("accuracy")
+)
+    
+# One hot encoding for y_test needs to be done
+# Convert from factor to numeric (0,1,2,3)
+y_numeric_test <- as.integer(factor(y_test, levels = levels(y_test))) - 1
+
+bat_fam_test <- to_categorical(y_numeric_test)
+
+  # train the model on whole training data
+fit <- model %>% fit(
+    x = as.matrix(x_train), y = bat_fam,
+    validation_data = list(as.matrix(x_test), bat_fam_test),verbose=0)
+fit
+```
+
+```{r}
+end_time-start_time
+```
+
+It took around **8** minutes to tune the number of neurons in hidden layer.
+
+**Note**: Execution time may vary from system to system.
+
+```{r}
+# Predict on test data
+predictions_model2 <- model %>% predict(as.matrix(x_test))
+
+# Convert predictions from one-hot encoded to class labels
+predicted_classes <- apply(predictions_model2, 1, which.max) - 1
+
+# Convert numeric class labels back to original labels
+predicted_classes <- levels(y_test)[predicted_classes + 1]
+
+# Show predicted classes
+head(predicted_classes)
+```
+
+```{r}
+# Calculate confusion matrix for model built using H_best on test data
+conf_matrix_model2 <- table(predicted_classes, y_test)
+conf_matrix_model2
+```
+
+```{r}
+# Compute accuracy
+accuracy <- sum(diag(conf_matrix_model2)) / sum(conf_matrix_model2)
+
+# Compute precision, recall, and F1 score for each class
+precision <- diag(conf_matrix_model2) / rowSums(conf_matrix_model2)
+recall <- diag(conf_matrix_model2) / colSums(conf_matrix_model2)
+f1_score <- 2 * (precision * recall) / (precision + recall)
+
+# Average precision, recall, and F1 score
+avg_precision <- mean(precision, na.rm = TRUE)
+avg_recall <- mean(recall, na.rm = TRUE)
+avg_f1_score <- mean(f1_score, na.rm = TRUE)
+
+# Print accuracy and other measures
+cat("Accuracy:", accuracy, "\n")
+cat("Average Precision:", avg_precision, "\n")
+cat("Average Recall:", avg_recall, "\n")
+cat("Average F1 Score:", avg_f1_score, "\n")
+```
+
+## Comparing the two models
+
+-   Multinomial logistic regression with lasso penalty model had an accuracy of **0.839** on test data(unseen) whereas the neural network model had an accuracy of **0.894**.
+-   The neural network model outperforms the multinomial logistic regression model not only in terms of accuracy but also in terms of precision, recall, f1-scores.
+-   However, the performance metrics in the second model might be deceiving sometimes indicating over fitting. Also, tuning these models take substantial amount of time and computational resources.\
+-   Therefore, we select the **multinomial logistic regression model wih lasso penalty** as our preferred(best) model for general predictions on unseen data as it is computationally less expensive and also we are able to mitigate the risk of over fitting by introducing the lasso penalty.
+
+## Generalised predictive performance: Model 1
+
+**Note** : Already done earlier on **test** data.
+
+```{r}
+conf_matrix_model1
+```
+
+```{r}
+accuracy <- sum(diag(conf_matrix_model1)) / sum(conf_matrix_model1)
+
+precision <- diag(conf_matrix_model1) / rowSums(conf_matrix_model1)
+recall <- diag(conf_matrix_model1) / colSums(conf_matrix_model1)
+f1_score <- 2 * (precision * recall) / (precision + recall)
+
+# Average precision, recall, and F1 score
+avg_precision <- mean(precision, na.rm = TRUE)
+avg_recall <- mean(recall, na.rm = TRUE)
+avg_f1_score <- mean(f1_score, na.rm = TRUE)
+
+# Print accuracy and other metrics
+cat("Accuracy:", accuracy, "\n")
+cat("Average Precision:", avg_precision, "\n")
+cat("Average Recall:", avg_recall, "\n")
+cat("Average F1 Score:", avg_f1_score, "\n")
+```
+
+-   Model1(best model) achieved an overall accuracy of **83.92 %** on unseen test data. Also, the average precision, recall and f1-scores are reasonable suggesting balanced performance across all classes of bat families.
+
+## Predictive ability on calls from the family emba (Emballonuridae).
+
+```{r}
+conf_matrix_model1
+```
+
+The model correctly classified **136** calls(true positives) out of **166** calls from the **Emballonuridge** family of bats.
+
+However, the model misclassified **30** calls from **Emballonuridge** family as calls from a different bat family.
+
+Summarizing,\
+The model demonstrates reasonably good ability to identify calls from the **Emballonuridge** bat family with a high count of true positives, however, there is still room for improvement as some misclassifications instances can be seen in the confusion matrix. Further increasing the data space might help in enhancing the model's performance.

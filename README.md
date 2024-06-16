@@ -16,11 +16,12 @@ Assignment 1 involves data analysis and implementation of classifiers to predict
 For detailed questions and solutions, navigate to the [Assignment 1 folder](Assignment-1).
 
 ## Assignment 2
-Assignment 2 focuses on theoretical questions on neural networks.
+Assignment 2 focuses on theoretical aspects of neural networks and includes questions on convolutional neural networks and other related topics.
 
 - **Files**:
   - `STAT40970_assignment_2.pdf`: Assignment questions.
-  - `Solution.pdf`: Solution hosted on GitHub Pages.
+  - `Solution.pdf`: Solution in PDF format, viewable online.
+  - `Solution.qmd`: Quarto Markdown file with the solutions.
 
 For detailed questions and solutions, navigate to the [Assignment 2 folder](Assignment-2).
 
